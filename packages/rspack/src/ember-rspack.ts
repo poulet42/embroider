@@ -33,7 +33,6 @@ import makeDebug from 'debug';
 import { format } from 'util';
 import type { Options, BabelLoaderOptions } from './options';
 import crypto from 'crypto';
-import semverSatisfies from 'semver/functions/satisfies';
 import supportsColor from 'supports-color';
 import type { Options as HbsLoaderOptions } from '@embroider/hbs-loader';
 import type { Options as EmbroiderPluginOptions } from './rspack-resolver-plugin';
@@ -129,9 +128,8 @@ const Rspack: PackagerConstructor<Options> = class Rspack implements Packager {
     private consoleWrite: (msg: string) => void,
     options?: Options
   ) {
-    if (!semverSatisfies(rspack.version, '^1.0.0')) {
-      throw new Error(`@embroider/rspack requires @rspack/core 1.x, but found version ${rspack.version}`);
-    }
+    // Note: rspack.version returns webpack compatibility version (5.x), not rspack version (1.x)
+    // The peerDependency on @rspack/core already enforces the correct version
 
     let packageCache = RewrittenPackageCache.shared('embroider', appRoot);
     this.pathToVanillaApp = packageCache.maybeMoved(packageCache.get(appRoot)).root;
@@ -157,11 +155,20 @@ const Rspack: PackagerConstructor<Options> = class Rspack implements Packager {
   }
 
   async build(): Promise<void> {
-    this._bundleSummary = undefined;
-    this.beginBarrier(this.variants.length);
-    let appInfo = this.examineApp();
-    let compiler = this.getRspack(appInfo);
-    await this.runRspack(compiler);
+    try {
+      debug('Starting rspack build');
+      this._bundleSummary = undefined;
+      this.beginBarrier(this.variants.length);
+      let appInfo = this.examineApp();
+      debug('App examined, creating rspack compiler');
+      let compiler = this.getRspack(appInfo);
+      debug('Compiler created, running rspack');
+      await this.runRspack(compiler);
+      debug('Rspack build complete');
+    } catch (error) {
+      debug('Rspack build failed with error: %O', error);
+      throw error;
+    }
   }
 
   private examineApp(): AppInfo {
@@ -310,7 +317,7 @@ const Rspack: PackagerConstructor<Options> = class Rspack implements Packager {
       mergeWith({}, this.configureRspack(appInfo, variant, variantIndex), this.extraConfig, appendArrays)
     );
     this.lastAppInfo = appInfo;
-    return (this.lastRspack = rspack.rspack(config));
+    return (this.lastRspack = rspack(config));
   }
 
   private async writeScript(script: string, written: Set<string>, variant: Variant) {

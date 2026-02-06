@@ -420,7 +420,90 @@ export class Resolver {
 
     let packageName = getPackageName(im.fromFile);
     if (packageName) {
-      let dep = this.packageCache.resolve(packageName, pkg);
+      // Try to resolve the package from the current package's perspective
+      let dep: Package | undefined;
+      try {
+        dep = this.packageCache.resolve(packageName, pkg);
+      } catch (err) {
+        // If resolution fails (common in pnpm with transitive dependencies),
+        // try resolving from the app root instead
+        debug('Failed to resolve %s from %s, trying from app root: %s', packageName, pkg.name, err);
+        try {
+          let appPkg = this.packageCache.get(this.options.appRoot);
+          dep = this.packageCache.resolve(packageName, appPkg);
+        } catch (err2) {
+          // If that also fails, try getting the package directly from the cache
+          // This works when the package has been seen before, even if not directly accessible
+          debug('Failed to resolve %s from app root, trying direct cache lookup: %s', packageName, err2);
+          try {
+            // Try to find the package in rewritten-packages
+            const rewrittenPackagesDir = resolve(this.options.appRoot, 'node_modules', '.embroider', 'rewritten-packages');
+            const fs = require('fs');
+            if (fs.existsSync(rewrittenPackagesDir)) {
+              let searchDir = rewrittenPackagesDir;
+              let packageBaseName = packageName;
+
+              // Handle scoped packages: @scope/name -> search in @scope/ directory for name.*
+              if (packageName.startsWith('@')) {
+                const [scope, name] = packageName.split('/');
+                const scopeDir = resolve(rewrittenPackagesDir, scope);
+                if (fs.existsSync(scopeDir)) {
+                  searchDir = scopeDir;
+                  packageBaseName = name;
+                }
+              }
+
+              const entries = fs.readdirSync(searchDir);
+              for (const entry of entries) {
+                // Match entries like "packageName.hash"
+                if (entry === packageBaseName || entry.startsWith(packageBaseName + '.')) {
+                  const pkgPath = resolve(searchDir, entry, 'node_modules', packageName);
+                  if (fs.existsSync(pkgPath)) {
+                    dep = this.packageCache.get(pkgPath);
+                    debug('Found %s via rewritten-packages at %s', packageName, pkgPath);
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (err3) {
+            debug('Failed to find %s in rewritten-packages: %s', packageName, err3);
+          }
+
+          if (!dep) {
+            // Last resort: try searching the pnpm store
+            try {
+              const pnpmStoreDir = resolve(this.options.appRoot, 'node_modules', '.pnpm');
+              const fs = require('fs');
+              if (fs.existsSync(pnpmStoreDir)) {
+                const entries = fs.readdirSync(pnpmStoreDir);
+                // Search for entries matching the package name
+                // pnpm stores scoped packages as @scope+name@version instead of @scope/name@version
+                const searchPattern = packageName.replace('/', '+');
+                for (const entry of entries) {
+                  // Match entries like "packageName@version" or "@scope+name@version"
+                  if (entry.startsWith(searchPattern + '@')) {
+                    const pkgPath = resolve(pnpmStoreDir, entry, 'node_modules', packageName);
+                    if (fs.existsSync(pkgPath)) {
+                      dep = this.packageCache.get(pkgPath);
+                      debug('Found %s via pnpm store at %s', packageName, pkgPath);
+                      break;
+                    }
+                  }
+                }
+              }
+            } catch (err4) {
+              debug('Failed to find %s in pnpm store: %s', packageName, err4);
+            }
+
+            if (!dep) {
+              // If all resolution strategies fail, rethrow the original error
+              throw err;
+            }
+          }
+        }
+      }
+
       return logTransition(
         `dep's implicit modules`,
         request,
